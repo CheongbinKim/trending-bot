@@ -3,9 +3,12 @@ import re
 import asyncio
 import openai
 import requests
+import json
 
 from kselenium import KSelenium 
 from selenium.webdriver.common.by import By
+
+from requests_toolbelt import MultipartEncoder
 
 from klogging import *
 
@@ -19,6 +22,59 @@ api_id = os.environ.get("API_ID")
 api_pw = os.environ.get("API_PW")
 api_callback = os.environ.get("CALLBACK")
 blog_name = os.environ.get("BLOG_NAME")
+
+async def addThum(image_url,access_token):
+    info(image_url)
+    # 대상 서버 URL (이미지를 전송할 서버의 엔드포인트)
+    target_url = f'https://tistory.com/apis/post/attach?access_token={access_token}&blogName={blog_name}&targetUr={blog_name}&output=json'
+
+    image_extension = os.path.splitext(image_url)[-1].lower()
+
+    # 이미지 확장자에 따라 Content-Type 설정
+    if image_extension == '.jpg' or image_extension == '.jpeg':
+        content_type = 'image/jpeg'
+    elif image_extension == '.png':
+        content_type = 'image/png'
+    elif image_extension == '.gif':
+        content_type = 'image/gif'
+    elif image_extension == '.tiff':
+        content_type = 'image/tiff'
+    elif image_extension == '.webp':
+        content_type = 'image/webp'
+    else:
+        content_type = 'application/octet-stream'  # 기본값으로 설정
+
+    # MultipartEncoder를 사용하여 데이터 준비
+    multipart_data = MultipartEncoder(
+        fields={
+            'uploadedfile': ('image' + image_extension, requests.get(image_url).content, content_type)
+        }
+    )
+
+    info(multipart_data.content_type)
+
+    # 요청 헤더 설정 (multipart/form-data로 전송)
+    headers = {
+        'Content-Type': multipart_data.content_type,
+        'Authorization': f'Bearer {access_token}'
+    }
+
+    # 파일을 대상 서버로 전송
+    response = requests.post(target_url, headers=headers, data=multipart_data)
+    
+    thum_url = json.loads(response.text)['tistory']['url']
+
+    info(thum_url)
+
+    # 임시 파일 삭제
+    if response.status_code == 200:
+        info('이미지 업로드 성공')
+    else:
+        info('이미지 업로드 실패. 응답 코드:', response.status_code)
+
+    
+
+    return thum_url
 
 async def clickHeart(url):
     info(url)
@@ -34,7 +90,6 @@ async def sendCodeCallback():
     driver = KSelenium()
     driver.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: ()=> undefined});")
 
-    info('go')
     driver.go(f'https://www.tistory.com/oauth/authorize?client_id={api_id}&redirect_uri={api_callback}&response_type=code')
     # kakao login
 
@@ -52,15 +107,12 @@ async def sendCodeCallback():
     el = driver.get('//*[@id="mainContent"]/div/div/form/div[4]/button[1]')
     el.click()
 
-    info('sleep 3')
     await asyncio.sleep(3)
 
     #driver.driver.save_screenshot('test.png')
 
-    info('get el')
     el = driver.get('//*[@id="contents"]/div[4]/button[1]')
 
-    info('el click()')
     el.click()
 
     await asyncio.sleep(1)
@@ -118,23 +170,28 @@ async def getTrendsToWrite(access_token):
         gpt_keyword = keyword.text
 
         origin_link = keyword.get_attribute('href')
+
         info(origin_link)
 
         origin = f'<p data-ke-size="size16"><a href="{origin_link}">{origin_link}</a>&nbsp;</p>'
-
-        info(origin)
 
         driver.go(origin_link)
 
         await asyncio.sleep(5)
 
-        og_image_tag = driver.driver.find_element(By.CSS_SELECTOR,"meta[property='og:image']")
+        og_image_url = ''
 
-        og_image_url = og_image_tag.get_attribute("content")
-        info(og_image_url)
-
-        await asyncio.sleep(1)
-        
+        try:
+            og_image_tag = driver.driver.find_element(By.CSS_SELECTOR,"meta[property='og:image']")
+            og_image_url = og_image_tag.get_attribute("content")
+            info(og_image_url)
+            og_image_url = await addThum(og_image_url,access_token)
+            info(og_image_url)
+            await asyncio.sleep(1)
+        except:
+            info('og:image 가져오기 실패, 자동생성 썸네일 추가 필요')
+            og_image_url = ''
+                
         origin_img = f'<p><img src={og_image_url}></p>'
 
         content = f'{search_date} Please create a blog about {gpt_keyword} topics in html format, no footer, only body without body tag'
@@ -147,8 +204,6 @@ async def getTrendsToWrite(access_token):
         )
 
         answer = response['choices'][0]['message']['content']
-
-        info(answer)
 
         write_params = {
             'access_token': access_token,
@@ -163,10 +218,6 @@ async def getTrendsToWrite(access_token):
         }
 
         response = requests.post('https://www.tistory.com/apis/post/write',params=write_params)
-
-        info(response.text)
-
-        info(type(response.text))
 
         json_res = response.json()
 
